@@ -1,0 +1,1 @@
+clang .\re_render_windows_terminal.c re_render_utilities.c -o re_render.exe -lgdi32 -luser32 -O2
