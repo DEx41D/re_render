@@ -1,18 +1,79 @@
-﻿#define _WIN32_WINNT 0x0600
+﻿/* 
+    The MIT License (MIT)
 
-#include <stdio.h>
+    Copyright (c) 2025-2026 The Rediska4445 Author
+
+    Permission is hereby granted, free of charge, to any person obtaining a copy
+    of this software and associated documentation files (the "Software"), to deal
+    in the Software without restriction, including without limitation the rights
+    to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+    copies of the Software, and to permit persons to whom the Software is
+    furnished to do so, subject to the following conditions:
+
+    The above copyright notice and this permission notice shall be included in
+    all copies or substantial portions of the Software.
+
+    THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+    IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+    FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+    AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+    LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+    OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+    THE SOFTWARE.
+*/
+
+#define _WIN32_WINNT 0x0600
+
 #include "re_render_utilities.h"
 
 #pragma comment(lib, "user32.lib")
 #pragma comment(lib, "gdi32.lib")
 
+// Main data which using in program
+// They is not into sturcture for optimization
 int g_max_fps = 60;
 int g_buffer_width = 160;
 int g_buffer_height = 60;
 int g_auto_size = 0;
+int g_bits_per_channel = 8;
+int g_color_threshold = 0;
+int g_scroll = 1;
+int g_interlacing = 0;
+int g_verbose = 0;
 const char* target_window_title;
 wchar_t g_block_char = L'█';
 
+// Data for color processing
+int g_color_shift = 0;
+BYTE g_color_mask = 0xFF;
+
+// Data for render processing
+unsigned int frame_counter = 0;
+
+// Color cache
+char g_ansi_color_cache[16][16][16][20];
+int g_ansi_color_lengths[16][16][16];
+
+// TODO:
+// OpenMP
+#define ROW_BUF_SIZE (120 * 32) 
+char row_buffers[40][ROW_BUF_SIZE]; 
+int row_lengths[40];
+
+// Verbose
+unsigned long long g_interlacing_skipped_frames = 0;
+
+// Verbose functions
+#define InterlacingSkippedFramesStats count_skipped_frame(g_verbose, &g_interlacing_skipped_frames)
+static inline void count_skipped_frame(int verbose_mode, unsigned long long* counter)
+{
+    if (verbose_mode)
+    {
+        (*counter)++;
+    }
+}
+
+// Parse the input arguments
 int ParseCmdArguments(int argc, char* argv[])
 {
     if (argc < 2)
@@ -25,6 +86,35 @@ int ParseCmdArguments(int argc, char* argv[])
     target_window_title = argv[1];
 
     for (int i = 2; i < argc; i++) {
+        if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) 
+        {
+            PrintHelp(argv[0]);
+            exit(0);
+        }
+        else if (strncmp(argv[i], "--color-threshold=", 18) == 0)
+        {
+            g_color_threshold = atoi(argv[i] + 18);
+            if (g_color_threshold < 0)  
+                g_color_threshold = 0;
+            if (g_color_threshold > 255) 
+                g_color_threshold = 255;
+        }
+        else if (strncmp(argv[i], "--color-depth=", 14) == 0)
+        {
+            g_bits_per_channel = atoi(argv[i] + 14);
+
+            if (g_bits_per_channel < 1)
+                g_bits_per_channel = 1;
+            if (g_bits_per_channel > 8) 
+                g_bits_per_channel = 8;
+        }
+        else if (strncmp(argv[i], "--char=", 7) == 0) 
+        {
+            wchar_t ch = Utf8ToWchar(argv[i] + 7);
+
+            if (ch != 0) 
+                g_block_char = ch;
+        }
         if (strncmp(argv[i], "--fps=", 6) == 0)
             g_max_fps = atoi(argv[i] + 6);
         else if (strncmp(argv[i], "--width=", 8) == 0)
@@ -33,22 +123,48 @@ int ParseCmdArguments(int argc, char* argv[])
             g_buffer_height = atoi(argv[i] + 9);
         else if (strncmp(argv[i], "--auto-size", 11) == 0)
             g_auto_size = 1;
-        else if (strncmp(argv[i], "--char=", 7) == 0) {
-            wchar_t ch = Utf8ToWchar(argv[i] + 7);
+        else if (strncmp(argv[i], "--scroll-disable", 16) == 0)
+            g_scroll = 0;
+        else if (strncmp(argv[i], "--interlacing", 13) == 0)
+                g_interlacing = 1;
+        else if (strncmp(argv[i], "--verbose", 9) == 0)
+            g_verbose = 1;
+    }
 
-            if (ch != 0) 
-                g_block_char = ch;
+    return 0;
+}
+
+// Function for color cache
+int InitColorCache()
+{
+    for (int r = 0; r < 16; r++)
+    {
+        for (int g = 0; g < 16; g++) 
+        {
+            for (int b = 0; b < 16; b++) 
+            {
+                int true_r = (r * 255) / 15;
+                int true_g = (g * 255) / 15;
+                int true_b = (b * 255) / 15;
+
+                int len = snprintf(g_ansi_color_cache[r][g][b], 20, "\x1b[38;2;%d;%d;%dm", true_r, true_g, true_b);
+                g_ansi_color_lengths[r][g][b] = len;
+            }
         }
     }
 
     return 0;
 }
 
+// Start point
 int main(int argc, char* argv[]) 
 {
     // Parse arguments from command line
-    if(ParseCmdArguments(argc, argv) != 0) 
+    if(ParseCmdArguments(argc, argv) != 0)
         return 1;
+
+    // Setup cache for color
+    InitColorCache();
 
     // Find window, title which was transfered by command line arguments
     // That using std function from windows.h
@@ -167,7 +283,8 @@ int main(int argc, char* argv[])
     SetConsoleCP(CP_UTF8);
 
     // Hide text cursor
-    CONSOLE_CURSOR_INFO cci = {
+    CONSOLE_CURSOR_INFO cci = 
+    {
         sizeof(cci), FALSE
     };
     SetConsoleCursorInfo(hStdOut, &cci);
@@ -177,7 +294,8 @@ int main(int argc, char* argv[])
     fflush(stdout);
 
     // Convert utf-8 char to wide
-    char utf8char[5] = {
+    char utf8char[5] = 
+    {
         0
     };
     int utf8_len = WideCharToMultiByte(CP_UTF8, 0, &g_block_char, 1, utf8char, sizeof(utf8char), NULL, NULL);
@@ -200,7 +318,7 @@ int main(int argc, char* argv[])
     // For optimize in resampling (idk what is it)
     int stride = (src_width * 3 + 3) & ~3;
 
-    // ----------------------- NEW CODE -------------------------------
+    // Prepare memory for "prev-current translate optimization"
     static BYTE* prev_pixels = NULL;
     static int is_first_frame = 1;
     static int prev_w = 0, prev_h = 0;
@@ -212,16 +330,23 @@ int main(int argc, char* argv[])
         is_first_frame = 1;
     }
 
-    const char move_next_line[] = "\x1b[0m\x1b[1E";
-    const size_t move_next_line_lgt = sizeof(move_next_line) - 1;
-
+    // const char move_next_line[] = "\x1b[0m\x1b[1E";
+    // const size_t move_next_line_lgt = sizeof(move_next_line) - 1;
     int skip_accumulator = 0;
 
-    // ----------------------------------------------------------------
+    // Disable hystory in console
+    if (!g_scroll) 
+    {
+        printf("\033[?1049h\033[2J\033[H");
+    }
 
     // Main loop for render
     while (1) 
     {
+        // Frame count, in particular for interlacing
+        frame_counter++;
+
+        // Time for fps delay
         ULONGLONG frame_start = GetTickCount64();
 
         // Get all "real" space (cuz PW_CLIENTONLY) of window to hdcMem
@@ -258,6 +383,15 @@ int main(int argc, char* argv[])
         // Resampling
         for (int y = 0; y < g_buffer_height; y++)
         {
+            // Interlacing
+            if (g_interlacing & ((y ^ frame_counter) & 1)) // Detect for even (all even number have 1 on last bit position, and else)
+            {
+                // Verbose code
+                InterlacingSkippedFramesStats;
+
+                continue;
+            }
+
             // Nearest-Neighbor Interpolation method for y
             int src_y = (y * src_height) / g_buffer_height;
             int x = 0;
@@ -279,11 +413,14 @@ int main(int argc, char* argv[])
                 // Blue
                 BYTE b = px[0];
 
-                // ----------------------- NEW CODE -------------------------------
+                // "prev-current translate" optimization
                 if (!is_first_frame)
                 {
                     BYTE* prev_px = prev_pixels + (y * g_buffer_width + x) * 3;
-                    if (r == prev_px[2] && g == prev_px[1] && b == prev_px[0])
+
+                    int diff = abs(r - prev_px[2]) + abs(g - prev_px[1]) + abs(b - prev_px[0]);
+
+                    if (diff <= g_color_threshold)
                     {
                         skip_accumulator++;
                         x++;
@@ -293,15 +430,30 @@ int main(int argc, char* argv[])
 
                 if (skip_accumulator > 0)
                 {
-                    int n_skip = snprintf(out_buf + pos, max_buf_size - pos, "\x1b[%dG", x + 1);
-                    if (n_skip < 0 || (size_t)n_skip >= max_buf_size - pos)
-                        break;
-                    pos += (size_t)n_skip;
+                    int target_x = x + 1;
+                    char* p_skip = out_buf + pos;
+                    *p_skip++ = '\x1b'; *p_skip++ = '[';
+
+                    if (target_x >= 100) 
+                    { 
+                        *p_skip++ = '0' + (target_x / 100);
+                        target_x %= 100;
+                        *p_skip++ = '0' + (target_x / 10); 
+                    }
+                    else if (target_x >= 10) 
+                    { 
+                        *p_skip++ = '0' + (target_x / 10); 
+                    }
+
+                    *p_skip++ = '0' + (target_x % 10);
+                    *p_skip++ = 'G';
+
+                    pos += (p_skip - (out_buf + pos));
                     skip_accumulator = 0;
                 }
-                // ---------------------------------------------------------------
 
-                // Color optimization for render:
+                // Color fast-runner optimization for render:
+                // 1 Stage of optimization:
                 // code dont print own color on each symbol,
                 // he just look on next pixel-colors, and print color once to all colors in row.
                 int group_end = x + 1;
@@ -313,14 +465,17 @@ int main(int argc, char* argv[])
                     // Pixel
                     BYTE* pxt = row_ptr + (sx * 3);
 
-                    // ----------------------- NEW CODE -------------------------------
+                    // 2 Stage fast-runner of optimization: 
+                    // Code compare current pixels with pixels from previous frame
                     if (!is_first_frame)
                     {
                         BYTE* prev_pxt = prev_pixels + (y * g_buffer_width + group_end) * 3;
-                        if (pxt[2] == prev_pxt[2] && pxt[1] == prev_pxt[1] && pxt[0] == prev_pxt[0])
+
+                        // Apply the color zone (outta args)
+                        int diff_t = abs(pxt[2] - prev_pxt[2]) + abs(pxt[1] - prev_pxt[1]) + abs(pxt[0] - prev_pxt[0]);
+                        if (diff_t <= g_color_threshold)
                             break;
                     }
-                    // ---------------------------------------------------------------
 
                     // End of 
                     if (pxt[2] != r || pxt[1] != g || pxt[0] != b)
@@ -331,13 +486,20 @@ int main(int argc, char* argv[])
 
                 // Count of pixels
                 int count = group_end - x;
-                int n = snprintf(out_buf + pos, max_buf_size - pos, "\x1b[38;2;%d;%d;%dm", r, g, b);
 
-                if (n < 0 || (size_t) n >= max_buf_size - pos) 
-                    break; 
+                if (pos + 32 >= max_buf_size) 
+                    break;
 
-                // Offset the position
-                pos += (size_t) n;
+                // pos += FastAppendTrueColor(out_buf + pos, r, g, b, g_bits_per_channel);
+
+                // NEW CODE _______
+                int r_idx = r >> 4;
+                int g_idx = g >> 4;
+                int b_idx = b >> 4;
+
+                memcpy(out_buf + pos, g_ansi_color_cache[r_idx][g_idx][b_idx], g_ansi_color_lengths[r_idx][g_idx][b_idx]);
+                pos += g_ansi_color_lengths[r_idx][g_idx][b_idx];
+                // ------------------
 
                 for (int i = 0; i < count; i++) 
                 {
@@ -347,12 +509,11 @@ int main(int argc, char* argv[])
                     memcpy(out_buf + pos, utf8char, utf8_len);
                     pos += (size_t) utf8_len;
 
-                    // ----------------------- NEW CODE -------------------------------
+                    // Save previous frame
                     BYTE* save_px = prev_pixels + (y * g_buffer_width + (x + i)) * 3;
                     save_px[2] = r;
                     save_px[1] = g;
                     save_px[0] = b;
-                    // ---------------------------------------------------------------
                 }
 
                 x = group_end;
@@ -376,13 +537,13 @@ int main(int argc, char* argv[])
         // Sleep for fps with delta
         int target_frame_time = 1000 / g_max_fps;
 
-        // Calculate delta of render frame time
+        // Calculate delta of render frame time for fps delay
         ULONGLONG elapsed_time = GetTickCount64() - frame_start;
 
         // Sweet dreams...
         if (elapsed_time < (ULONGLONG) target_frame_time)
         {
-            Sleep(target_frame_time - (int)elapsed_time);
+            Sleep(target_frame_time - (int) elapsed_time);
         }
         else
         {
@@ -401,6 +562,22 @@ int main(int argc, char* argv[])
     DeleteObject(hbm);
     DeleteDC(hdcMem);
     ReleaseDC(hwnd, hdcWindow);
+
+    if (!g_scroll) 
+    {
+        fprintf(stdout, "\033[?1049l");
+        fflush(stdout);
+    }
+
+    if (g_verbose)
+    {
+        Sleep(1000);
+
+        fprintf(stderr, "\n\n___ Verbose ___\n");
+        fprintf(stderr, "Interlacing skipped rows: %llu\n", g_interlacing_skipped_frames);
+        fprintf(stderr, "======================================\n");
+        fflush(stderr);
+    }
 
     return 0;
 }
