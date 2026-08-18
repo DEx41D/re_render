@@ -200,6 +200,25 @@ int main(int argc, char* argv[])
     // For optimize in resampling (idk what is it)
     int stride = (src_width * 3 + 3) & ~3;
 
+    // ----------------------- NEW CODE -------------------------------
+    static BYTE* prev_pixels = NULL;
+    static int is_first_frame = 1;
+    static int prev_w = 0, prev_h = 0;
+    if (!prev_pixels || prev_w != g_buffer_width || prev_h != g_buffer_height) 
+    {
+        free(prev_pixels);
+        prev_pixels = calloc(1, g_buffer_width * g_buffer_height * 3);
+        prev_w = g_buffer_width; prev_h = g_buffer_height;
+        is_first_frame = 1;
+    }
+
+    const char move_next_line[] = "\x1b[0m\x1b[1E";
+    const size_t move_next_line_lgt = sizeof(move_next_line) - 1;
+
+    int skip_accumulator = 0;
+
+    // ----------------------------------------------------------------
+
     // Main loop for render
     while (1) 
     {
@@ -260,6 +279,28 @@ int main(int argc, char* argv[])
                 // Blue
                 BYTE b = px[0];
 
+                // ----------------------- NEW CODE -------------------------------
+                if (!is_first_frame)
+                {
+                    BYTE* prev_px = prev_pixels + (y * g_buffer_width + x) * 3;
+                    if (r == prev_px[2] && g == prev_px[1] && b == prev_px[0])
+                    {
+                        skip_accumulator++;
+                        x++;
+                        continue;
+                    }
+                }
+
+                if (skip_accumulator > 0)
+                {
+                    int n_skip = snprintf(out_buf + pos, max_buf_size - pos, "\x1b[%dG", x + 1);
+                    if (n_skip < 0 || (size_t)n_skip >= max_buf_size - pos)
+                        break;
+                    pos += (size_t)n_skip;
+                    skip_accumulator = 0;
+                }
+                // ---------------------------------------------------------------
+
                 // Color optimization for render:
                 // code dont print own color on each symbol,
                 // he just look on next pixel-colors, and print color once to all colors in row.
@@ -271,6 +312,15 @@ int main(int argc, char* argv[])
 
                     // Pixel
                     BYTE* pxt = row_ptr + (sx * 3);
+
+                    // ----------------------- NEW CODE -------------------------------
+                    if (!is_first_frame)
+                    {
+                        BYTE* prev_pxt = prev_pixels + (y * g_buffer_width + group_end) * 3;
+                        if (pxt[2] == prev_pxt[2] && pxt[1] == prev_pxt[1] && pxt[0] == prev_pxt[0])
+                            break;
+                    }
+                    // ---------------------------------------------------------------
 
                     // End of 
                     if (pxt[2] != r || pxt[1] != g || pxt[0] != b)
@@ -296,10 +346,19 @@ int main(int argc, char* argv[])
 
                     memcpy(out_buf + pos, utf8char, utf8_len);
                     pos += (size_t) utf8_len;
+
+                    // ----------------------- NEW CODE -------------------------------
+                    BYTE* save_px = prev_pixels + (y * g_buffer_width + (x + i)) * 3;
+                    save_px[2] = r;
+                    save_px[1] = g;
+                    save_px[0] = b;
+                    // ---------------------------------------------------------------
                 }
 
                 x = group_end;
             }
+
+            skip_accumulator = 0;
 
             if (pos + sizeof(reset_nl) - 1 > max_buf_size) 
                 break;
@@ -311,6 +370,8 @@ int main(int argc, char* argv[])
         // Render the frame
         fwrite(out_buf, 1, pos, stdout);
         fflush(stdout);
+
+        is_first_frame = 0;
 
         // Sleep for fps with delta
         int target_frame_time = 1000 / g_max_fps;

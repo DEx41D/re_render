@@ -1,5 +1,10 @@
 #include "re_render_utilities.h"
 
+void PrintIntroMessage()
+{
+
+}
+
 // Function for transform UTF8 format string to WideChar format (for C work)
 // This function just using MultiByteToWideChar for transform
 wchar_t Utf8ToWchar(const char* utf8str)
