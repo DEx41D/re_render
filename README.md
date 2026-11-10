@@ -1,6 +1,6 @@
 # re_render
 
-A high-performance command-line utility designed to stream the graphical output of any active Windows window directly into the terminal using ANSI escape sequences.
+A command-line utility designed to stream the graphical output of any active Windows window directly into the terminal using ANSI escape sequences.
 
 ---
 
@@ -53,12 +53,12 @@ Usage: re_render.exe [target_window_title] [options]
 
 ## Quick Start Examples
 
-**Basic stream with performance optimization:**
+**Basic stream:**
 ```bash
 .\re_render.exe "Minecraft" --width=120 --height=40 --fps=60 --interlacing
 ```
 
-**Retro terminal style simulation:**
+**Advanced settings:**
 ```bash
 .\re_render.exe "VLC Media Player" --color-depth=4 --char="█" --auto-size
 ```
